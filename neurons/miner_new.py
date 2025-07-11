@@ -3,14 +3,14 @@
 # Copyright © 2023 Natix
 
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated
-# documentation files (the "Software"), to deal in the Software without restriction, including without limitation
+# documentation files (the “Software”), to deal in the Software without restriction, including without limitation
 # the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software,
 # and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
 
 # The above copyright notice and this permission notice shall be included in all copies or substantial portions of
 # the Software.
 
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
+# THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO
 # THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
 # THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 # OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
@@ -20,8 +20,6 @@ import base64
 import io
 import time
 import typing
-import json
-from datetime import datetime
 
 import bittensor as bt
 from PIL import Image
@@ -32,11 +30,55 @@ from natix.base.miner import BaseMinerNeuron
 from natix.protocol import ExtendedImageSynapse
 from natix.utils.config import get_device
 
-from transformers import ConvNextV2ForImageClassification
-from torchvision import transforms
-import torch
 import logging
 import os
+import torch
+import requests
+import redis
+import hashlib
+from requests.exceptions import Timeout
+
+rdb = redis.Redis(host='localhost', port=6379, db=0)
+
+def hash_image_bytes(image_bytes: bytes) -> str:
+    return hashlib.sha256(image_bytes).hexdigest()
+
+def predict_with_cache(image_bytes: bytes, timeout_sec=3, max_retries=3) -> float:
+    image_hash = hash_image_bytes(image_bytes)
+
+    # Check Redis cache first
+    cached = rdb.get(image_hash)
+    if cached:
+        print("🟡 Found in local Redis cache.")
+        return float(cached)
+
+    files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.post("http://localhost:8000/predict", files=files, timeout=timeout_sec)
+            response.raise_for_status()
+            result = response.json()
+
+            if "error" in result:
+                print(f"❌ Server error: {result['error']}")
+                continue
+
+            if not result["from_cache"]:
+                rdb.set(image_hash, result["probability"])
+                print("🟢 Inference from GPU.")
+            else:
+                print("🟢 Served from server cache.")
+
+            return result["probability"]
+
+        except Timeout:
+            print(f"⚠️ Timeout on attempt {attempt}/{max_retries}. Retrying...")
+        except requests.RequestException as e:
+            print(f"❌ Request failed: {e}")
+            break
+
+    return 0.999999999
 
 class Miner(BaseMinerNeuron):
 
@@ -97,11 +139,6 @@ class Miner(BaseMinerNeuron):
         )
         bt.logging.info(f"Loaded image detection model: {self.config.neuron.image_detector}")
 
-        model = ConvNextV2ForImageClassification.from_pretrained("/root/natix/best_model")
-        model.to(device = torch.device("cuda" if torch.cuda.is_available() else "cpu"))
-        model.eval()
-        self.image_detector_new = model
-
     async def forward_image(self, synapse: ExtendedImageSynapse) -> ExtendedImageSynapse:
         """
         Perform inference on image
@@ -123,41 +160,9 @@ class Miner(BaseMinerNeuron):
             bt.logging.info("Received image challenge!")
             try:
                 image_bytes = base64.b64decode(synapse.image)
-                image = Image.open(io.BytesIO(image_bytes))
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
-                transform = transforms.Compose([
-                    transforms.ToTensor(),
-                    transforms.Normalize([0.5]*3, [0.5]*3)
-                ])
-                input_tensor = transform(image).unsqueeze(0).to(self.image_detector_new.device)  # Ensure image is a tensor
-                # Inference
-                with torch.no_grad():
-                    outputs = self.image_detector_new(input_tensor)
-                    synapse.prediction = torch.softmax(outputs.logits, dim=1)[0, 1].item()  # probability of class 1
-                    #synapse.prediction = outputs.logits.argmax(dim=1).item()
+                synapse.prediction = predict_with_cache(image_bytes, timeout_sec=4, max_retries=2)
                 synapse.model_url = str(self.config.model_url)
-                '''
-                prediction = str(synapse.prediction)                
-                safe_prediction = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in prediction)
-                
-                class_name = "work" if prediction > 0.5 else "not"
-                timestamp = time.strftime("%Y%m%d_%H%M%S")  # e.g., 20250618_114530
-                filename = f"{timestamp}_{class_name}_{safe_prediction}.png"
 
-                output_dir = "saved_images"
-                os.makedirs(output_dir, exist_ok=True)
-                file_path = os.path.join(output_dir, filename)
-                # 🔁 Limit to 10 most recent images
-                saved_images = sorted(
-                    [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")],
-                    key=os.path.getctime
-                )
-                if len(saved_images) > 20000:
-                    os.remove(saved_images[0])  # Remove the oldest one
-                # Save image
-                image.save(file_path, format='JPEG')
-                '''
             except Exception as e:
                 bt.logging.error("Error performing inference")
                 bt.logging.error(e)

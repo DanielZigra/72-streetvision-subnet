@@ -1,0 +1,15 @@
+pip install fastapi[all] torch torchvision transformers pillow redis
+
+Redis Installation Without Docker
+sudo apt update
+sudo apt install redis-server
+sudo systemctl enable redis-server.service
+sudo systemctl start redis-server.service
+
+Check Redis status:
+sudo systemctl status redis-server.service
+
+redis-cli ping
+# should respond: PONG
+
+
