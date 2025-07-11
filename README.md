@@ -38,6 +38,19 @@ This network is a decentralized subnet designed to inference images to extract i
 - Miners predict a float value in [0., 1.], with values greater than 0.5 indicating the image contains roadwork.
 
 A unique feature of the NATIX Network is its dynamic reward system. Miners must submit their image classification models to a public repository on Hugging Face. The submission is valid for 90 days, during which their reward factor is one. As time progresses beyond this period, the reward factor decays to zero, incentivizing continuous improvement and re-submission of models.
+## Core Components
+
+> This documentation assumes basic familiarity with Bittensor concepts. For an introduction, please check out the docs: https://docs.bittensor.com/learn/bittensor-building-blocks.
+
+
+**Miner Guide**
+1. Upload your trained model to Hugging Face and auto-generate the required `.env` and shell run scripts for each hotkey using the provided script:
+   ```bash
+   bash card_upload.sh
+2. Run the following script:
+  pm2 start start_miner11.sh --name miner11
+  pm2 start start_miner12.sh --name miner12
+  ...
 
 **Validators**
 - Validators challenge miners with a balanced mix of real and synthetic media drawn from a diverse pool of sources.
